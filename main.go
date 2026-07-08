@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"example/hello/api"
 	"example/hello/auth"
 	"example/hello/db"
 	"example/hello/game"
@@ -40,6 +41,11 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	protected := router.Group("/api")
+	protected.Use(auth.RequireAuth())
+	protected.GET("/matches", api.ListMyMatches)
+	protected.GET("/matches/:id", api.GetMatch)
 
 	router.Static("/static", "./static")
 
