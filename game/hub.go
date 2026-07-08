@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -69,20 +68,18 @@ func matchmake(hub *types.Hub, p *types.Player) *types.Player {
 	return nil
 }
 
-func addplayer(hub *types.Hub, name string, conn *websocket.Conn) *types.Player {
-	ID := uuid.New().String()
-	elo := 1200
+func addplayer(hub *types.Hub, u *types.User, conn *websocket.Conn) *types.Player {
 	player := &types.Player{
-		ID:       ID,
-		Name:     name,
-		ElO:      elo,
-		Gmail:    "",
+		ID:       u.ID,
+		Name:     u.Name,
+		ElO:      u.Elo,
+		Gmail:    u.Email,
 		Conn:     conn,
 		GameId:   "",
 		IsInGame: false,
 	}
 	hub.Players[player.ID] = player
-	fmt.Printf("[PLAYER] Created player: %s (ID: %s, ELO: %d)\n", name, ID, elo)
+	fmt.Printf("[PLAYER] Loaded player: %s (ID: %s, ELO: %d)\n", u.Name, u.ID, u.Elo)
 	return player
 }
 

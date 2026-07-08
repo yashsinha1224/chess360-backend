@@ -1,7 +1,10 @@
 package game
 
 import (
+	"context"
 	"encoding/json"
+	"example/hello/auth"
+	"example/hello/db"
 	"example/hello/intiaton"
 	"example/hello/rules"
 	"example/hello/types"
@@ -65,45 +68,32 @@ func signalGameEnd(game *types.Game) {
 
 func HandleWebSocket(hub *types.Hub) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		tokenStr := ctx.Query("token")
+		if tokenStr == "" {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+			return
+		}
+
+		userID, err := auth.ParseJWT(tokenStr)
+		if err != nil {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		dbUser, err := db.GetUserByID(ctx.Request.Context(), userID)
+		if err != nil {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+			return
+		}
+
 		conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 		if err != nil {
 			fmt.Println("[ERROR] Failed to upgrade connection:", err)
 			return
 		}
+		fmt.Println("[WS] Connected:", dbUser.Name)
 
-		fmt.Println("[WS] New connection established")
-
-		var msg types.Message
-		if err := conn.ReadJSON(&msg); err != nil {
-			fmt.Println("[ERROR] Failed to read join message:", err)
-			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"invalid message format"}}`))
-			conn.Close()
-			return
-		}
-
-		if msg.Type != types.MsgJoin {
-			fmt.Println("[ERROR] First message was not join:", msg.Type)
-			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"first message must be join"}}`))
-			conn.Close()
-			return
-		}
-
-		payload, ok := msg.Payload.(map[string]interface{})
-		if !ok {
-			fmt.Println("[ERROR] Invalid join payload")
-			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"invalid join payload"}}`))
-			conn.Close()
-			return
-		}
-
-		name, ok := payload["name"].(string)
-		if !ok || name == "" {
-			name = "Anonymous"
-		}
-
-		fmt.Printf("[PLAYER] New player joining: %s\n", name)
-
-		player := addplayer(hub, name, conn)
+		player := addplayer(hub, dbUser, conn)
 		addWaiting(hub, player)
 
 		done := make(chan struct{})
@@ -111,41 +101,28 @@ func HandleWebSocket(hub *types.Hub) gin.HandlerFunc {
 		defer unregisterDone(player.ID)
 
 		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"waiting","payload":{"message":"Looking for opponent..."}}`))
-		fmt.Printf("[PLAYER] %s added to waiting queue\n", name)
 
 		go func() {
-			fmt.Printf("[MATCH] %s looking for opponent...\n", player.Name)
 			opponent := matchmake(hub, player)
 			if opponent == nil {
-				fmt.Printf("[MATCH] %s - no opponent found yet\n", player.Name)
 				return
 			}
-
-			// IMPORTANT: Remove current player from bucket AFTER matchmake
 			removeFromBucket(hub, player)
-
-			fmt.Printf("[MATCH] MATCH FOUND: %s vs %s\n", player.Name, opponent.Name)
 
 			game := CreateGameAndMatch(hub, player, opponent)
 			if game == nil {
-				fmt.Printf("[ERROR] Failed to create game for %s vs %s\n", player.Name, opponent.Name)
-				// Put players back in queue if game creation fails
 				addWaiting(hub, player)
 				addWaiting(hub, opponent)
 				signalPlayerDone(player.ID)
 				signalPlayerDone(opponent.ID)
 				return
 			}
-
-			fmt.Printf("[GAME] Game %s: %s (White) vs %s (Black)\n", game.ID, game.White.Name, game.Black.Name)
 			play(hub, player, opponent, game)
 		}()
 
 		<-done
-		fmt.Printf("[PLAYER] %s handler exiting\n", name)
 	}
 }
-
 func CreateGameAndMatch(hub *types.Hub, p1, p2 *types.Player) *types.Game {
 	white := p1
 	black := p2
@@ -175,6 +152,10 @@ func CreateGameAndMatch(hub *types.Hub, p1, p2 *types.Player) *types.Game {
 	white.GameId = game.ID
 	black.GameId = game.ID
 	hub.Mu.Unlock()
+
+	if err := db.CreateMatch(context.Background(), game.ID, white.ID, black.ID, string(types.StatusActive)); err != nil {
+		fmt.Println("[ERROR] failed to persist match:", err)
+	}
 
 	fmt.Printf("[GAME] Game %s created, turn: %s\n", game.ID, game.Turn)
 
@@ -364,6 +345,24 @@ func handleDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
 	}
 	game.Status = types.StatusEneded
 
+	// Whoever disconnected loses; the other color wins.
+	if player == game.White {
+		game.Winner = types.Black
+	} else {
+		game.Winner = types.White
+	}
+
+	winner := "white"
+	if game.Winner == types.Black {
+		winner = "black"
+	} else if game.Winner == "Draw" {
+		winner = "draw"
+	}
+
+	if err := db.FinishMatch(context.Background(), game.ID, winner, string(game.Status), game.Moves); err != nil {
+		fmt.Println("[ERROR] failed to persist match result:", err)
+	}
+
 	opponent := game.Black
 	if player == game.Black {
 		opponent = game.White
@@ -403,6 +402,10 @@ func notifyGameOver(hub *types.Hub, game *types.Game) {
 		winner = "black"
 	} else if game.Winner == "Draw" {
 		winner = "draw"
+	}
+
+	if err := db.FinishMatch(context.Background(), game.ID, winner, string(game.Status), game.Moves); err != nil {
+		fmt.Println("[ERROR] failed to persist match result:", err)
 	}
 
 	msgBytes, _ := json.Marshal(map[string]interface{}{

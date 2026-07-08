@@ -69,3 +69,11 @@ type gameold struct {
 	WhiteConn      *websocket.Conn
 	BlackConn      *websocket.Conn
 }
+type User struct {
+	ID        string
+	GoogleID  string
+	Email     string
+	Name      string
+	Elo       int
+	CreatedAt time.Time
+}
