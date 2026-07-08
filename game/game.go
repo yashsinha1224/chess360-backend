@@ -66,11 +66,6 @@ func ValidMove(message []byte, gamestate *types.Game, conn *websocket.Conn) bool
 	conn.WriteMessage(websocket.TextMessage, []byte("illegal move"))
 	return false
 }
-
-// ExecuteMove validates the move itself before mutating any state. This
-// makes ExecuteMove safe to call directly — callers no longer need to call
-// ValidMove first, though doing so beforehand (e.g. to avoid extra logging
-// on a rejected move) is still fine, since this check is idempotent.
 func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 	if !ValidMove(message, g, p.Conn) {
 		return
@@ -79,7 +74,6 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 	msg := string(message)
 	parts := strings.Split(msg, ",")
 	if len(parts) != 2 {
-		// Unreachable given ValidMove passed, kept as defense in depth.
 		return
 	}
 
@@ -89,8 +83,19 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 		return
 	}
 
+	movingPiece := g.Board[fromRow][fromCol].Piece
+	capturedPiece := g.Board[toRow][toCol].Piece
+
 	g.Board[toRow][toCol].Piece = g.Board[fromRow][fromCol].Piece
 	g.Board[fromRow][fromCol].Piece = nil
+
+	if capturedPiece != nil && movingPiece != nil {
+		if movingPiece.GetColor() == types.White {
+			g.CapturedByWhite = append(g.CapturedByWhite, capturedPiece)
+		} else {
+			g.CapturedByBlack = append(g.CapturedByBlack, capturedPiece)
+		}
+	}
 
 	if piece, ok := g.Board[toRow][toCol].Piece.(*types.PawnPiece); ok {
 		piece.HasMoved = true
@@ -127,10 +132,16 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 	}
 	if rules.IsStalemate(g.Turn, g.Board) {
 		g.Status = types.StatusStalemate
-		if g.Turn == types.White {
-			g.Winner = "Draw"
-		} else {
-			g.Winner = "Draw"
+		g.Winner = "Draw"
+	}
+}
+func convertCapturedToJSON(pieces []types.ChessPiece) []interface{} {
+	out := make([]interface{}, len(pieces))
+	for i, p := range pieces {
+		out[i] = map[string]interface{}{
+			"type":  string(p.GetType()),
+			"color": string(p.GetColor()),
 		}
 	}
+	return out
 }

@@ -28,15 +28,17 @@ var (
 )
 
 type Game struct {
-	ID        string
-	White     *Player
-	Black     *Player
-	Board     [][]BoardSquare
-	Turn      Color
-	Status    GameStatus
-	Winner    Color
-	Moves     []string
-	StartTime time.Time
+	ID              string
+	White           *Player
+	Black           *Player
+	Board           [][]BoardSquare
+	Turn            Color
+	Status          GameStatus
+	Winner          Color
+	Moves           []string
+	StartTime       time.Time
+	CapturedByWhite []ChessPiece
+	CapturedByBlack []ChessPiece
 }
 
 type Message struct {

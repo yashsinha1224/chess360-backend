@@ -167,9 +167,11 @@ func notifyGameStart(game *types.Game) {
 	fmt.Printf("[NOTIFY] game_start → %s (White) and %s (Black)\n", game.White.Name, game.Black.Name)
 
 	boardMsg := map[string]interface{}{
-		"type":  "board_update",
-		"board": convertBoardToJSON(game.Board),
-		"turn":  string(game.Turn),
+		"type":            "board_update",
+		"board":           convertBoardToJSON(game.Board),
+		"turn":            string(game.Turn),
+		"capturedByWhite": convertCapturedToJSON(game.CapturedByWhite),
+		"capturedByBlack": convertCapturedToJSON(game.CapturedByBlack),
 	}
 	boardBytes, _ := json.Marshal(boardMsg)
 
@@ -310,9 +312,11 @@ func listenForMoves(hub *types.Hub, player *types.Player, game *types.Game) {
 		}
 
 		boardMsg := map[string]interface{}{
-			"type":  "board_update",
-			"board": convertBoardToJSON(game.Board),
-			"turn":  string(game.Turn),
+			"type":            "board_update",
+			"board":           convertBoardToJSON(game.Board),
+			"turn":            string(game.Turn),
+			"capturedByWhite": convertCapturedToJSON(game.CapturedByWhite),
+			"capturedByBlack": convertCapturedToJSON(game.CapturedByBlack),
 		}
 		boardBytes, _ := json.Marshal(boardMsg)
 
