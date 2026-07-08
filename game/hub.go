@@ -57,7 +57,6 @@ func matchmake(hub *types.Hub, p *types.Player) *types.Player {
 		if len(hub.Buckets[b]) >= 1 {
 			for i, opponent := range hub.Buckets[b] {
 				if opponent != p && !opponent.IsInGame {
-					// Remove opponent from bucket
 					hub.Buckets[b] = append(hub.Buckets[b][:i], hub.Buckets[b][i+1:]...)
 					fmt.Printf("[MATCH] %s matched with %s from bucket %d\n", p.Name, opponent.Name, b)
 					return opponent

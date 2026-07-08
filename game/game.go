@@ -5,8 +5,6 @@ import (
 
 	"example/hello/rules"
 	"strings"
-
-	"github.com/gorilla/websocket"
 )
 
 // parsePosition parses a square like "e2" into (row, col).
@@ -23,35 +21,35 @@ func parsePosition(pos string) (row int, col int, ok bool) {
 	return row, col, true
 }
 
-func ValidMove(message []byte, gamestate *types.Game, conn *websocket.Conn) bool {
+func ValidMove(message []byte, gamestate *types.Game, p *types.Player) bool {
 	msg := string(message)
 	parts := strings.Split(msg, ",")
 
 	if len(parts) != 2 {
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"malformed move"}}`))
+		send(p, []byte(`{"type":"error","payload":{"message":"malformed move"}}`))
 		return false
 	}
 
 	fromRow, fromCol, ok := parsePosition(parts[0])
 	if !ok {
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"invalid from-square"}}`))
+		send(p, []byte(`{"type":"error","payload":{"message":"invalid from-square"}}`))
 		return false
 	}
 	toRow, toCol, ok := parsePosition(parts[1])
 	if !ok {
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"invalid to-square"}}`))
+		send(p, []byte(`{"type":"error","payload":{"message":"invalid to-square"}}`))
 		return false
 	}
 
 	fromSquare := gamestate.Board[fromRow][fromCol]
 
 	if fromSquare.Piece == nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("no piece there"))
+		send(p, []byte(`{"type":"error","payload":{"message":"no piece there"}}`))
 		return false
 	}
 
 	if fromSquare.Piece.GetColor() != gamestate.Turn {
-		conn.WriteMessage(websocket.TextMessage, []byte("not your piece"))
+		send(p, []byte(`{"type":"error","payload":{"message":"not your piece"}}`))
 		return false
 	}
 
@@ -63,11 +61,12 @@ func ValidMove(message []byte, gamestate *types.Game, conn *websocket.Conn) bool
 		}
 	}
 
-	conn.WriteMessage(websocket.TextMessage, []byte("illegal move"))
+	send(p, []byte(`{"type":"error","payload":{"message":"illegal move"}}`))
 	return false
 }
+
 func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
-	if !ValidMove(message, g, p.Conn) {
+	if !ValidMove(message, g, p) {
 		return
 	}
 
@@ -135,6 +134,7 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 		g.Winner = "Draw"
 	}
 }
+
 func convertCapturedToJSON(pieces []types.ChessPiece) []interface{} {
 	out := make([]interface{}, len(pieces))
 	for i, p := range pieces {

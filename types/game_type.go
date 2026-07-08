@@ -8,13 +8,17 @@ import (
 )
 
 type Player struct {
-	ID       string
-	Name     string
-	Gmail    string
-	ElO      int
-	Conn     *websocket.Conn
-	GameId   string
-	IsInGame bool
+	ID        string
+	Name      string
+	Gmail     string
+	ElO       int
+	Conn      *websocket.Conn
+	GameId    string
+	IsInGame  bool
+	GameFound chan struct{}
+	Send      chan []byte // outbound writes go here; only writePump touches Conn for writing
+	Incoming  chan []byte // inbound game messages land here; only readPump touches Conn for reading
+	CloseOnce sync.Once
 }
 
 type GameStatus string

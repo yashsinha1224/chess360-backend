@@ -26,6 +26,8 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const disconnectGraceWindow = 60 * time.Second
+
 var (
 	playerDoneMu sync.Mutex
 	playerDone   = make(map[string]chan struct{})
@@ -66,6 +68,45 @@ func signalGameEnd(game *types.Game) {
 	}
 }
 
+// ---- Reconnect grace period ----
+//
+// When a player's socket dies mid-game, we don't end the game immediately.
+// We record a pendingDisconnect keyed by player.ID and give them 60s to
+// open a new WebSocket with a valid token for the same user. If they do,
+// handleReconnect rebinds the SAME *types.Player (and therefore the SAME
+// *types.Game.White/Black pointer) to the new connection. If the timer
+// fires first, finalizeDisconnect runs the old "opponent wins" logic.
+
+type pendingDisconnect struct {
+	timer  *time.Timer
+	game   *types.Game
+	player *types.Player
+}
+
+var (
+	graceMu sync.Mutex
+	grace   = make(map[string]*pendingDisconnect)
+)
+
+func opponentOf(game *types.Game, player *types.Player) *types.Player {
+	if player == game.White {
+		return game.Black
+	}
+	return game.White
+}
+
+func boardUpdateBytes(game *types.Game) []byte {
+	msg := map[string]interface{}{
+		"type":            "board_update",
+		"board":           convertBoardToJSON(game.Board),
+		"turn":            string(game.Turn),
+		"capturedByWhite": convertCapturedToJSON(game.CapturedByWhite),
+		"capturedByBlack": convertCapturedToJSON(game.CapturedByBlack),
+	}
+	b, _ := json.Marshal(msg)
+	return b
+}
+
 func HandleWebSocket(hub *types.Hub) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		tokenStr := ctx.Query("token")
@@ -91,16 +132,69 @@ func HandleWebSocket(hub *types.Hub) gin.HandlerFunc {
 			fmt.Println("[ERROR] Failed to upgrade connection:", err)
 			return
 		}
-		fmt.Println("[WS] Connected:", dbUser.Name)
 
+		// ---- Reconnection path: is this user mid-grace-period? ----
+		graceMu.Lock()
+		pd, isReconnect := grace[dbUser.ID]
+		if isReconnect {
+			delete(grace, dbUser.ID)
+		}
+		graceMu.Unlock()
+
+		if isReconnect {
+			pd.timer.Stop()
+			fmt.Printf("[RECONNECT] %s reconnected to game %s\n", dbUser.Name, pd.game.ID)
+
+			player := pd.player
+			player.Conn = conn
+			startPumps(player) // fresh Send/Incoming/GameFound bound to the new conn
+
+			done := make(chan struct{})
+			registerDone(player.ID, done)
+			defer unregisterDone(player.ID)
+
+			// Re-sync this player: who they are + current board state.
+			var color string
+			if player == pd.game.White {
+				color = "white"
+			} else {
+				color = "black"
+			}
+			resyncBytes, _ := json.Marshal(map[string]interface{}{
+				"type": "game_resync",
+				"payload": map[string]interface{}{
+					"gameId":   pd.game.ID,
+					"color":    color,
+					"opponent": opponentOf(pd.game, player).Name,
+				},
+			})
+			send(player, resyncBytes)
+			send(player, boardUpdateBytes(pd.game))
+
+			// Let the opponent know play can continue.
+			reconnectedBytes, _ := json.Marshal(map[string]interface{}{
+				"type":    "opponent_reconnected",
+				"payload": map[string]interface{}{"message": fmt.Sprintf("%s reconnected", player.Name)},
+			})
+			send(opponentOf(pd.game, player), reconnectedBytes)
+
+			go listenForMoves(hub, player, pd.game)
+
+			<-done
+			return
+		}
+
+		// ---- Normal path: brand-new player, goes into matchmaking ----
 		player := addplayer(hub, dbUser, conn)
+		startPumps(player) // reads/writes + ping/pong live from here on, even while queued
+
 		addWaiting(hub, player)
 
 		done := make(chan struct{})
 		registerDone(player.ID, done)
 		defer unregisterDone(player.ID)
 
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"waiting","payload":{"message":"Looking for opponent..."}}`))
+		send(player, []byte(`{"type":"waiting","payload":{"message":"Looking for opponent..."}}`))
 
 		go func() {
 			opponent := matchmake(hub, player)
@@ -120,9 +214,31 @@ func HandleWebSocket(hub *types.Hub) gin.HandlerFunc {
 			play(hub, player, opponent, game)
 		}()
 
+		// Detect a socket dying while the player is still queued. Once a
+		// game is found, GameFound closes and this goroutine steps aside
+		// immediately WITHOUT consuming from Incoming — listenForMoves
+		// becomes the sole reader from that point on.
+		go func() {
+			for {
+				select {
+				case _, ok := <-player.Incoming:
+					if !ok {
+						if !player.IsInGame {
+							CleanupPlayer(hub, player)
+						}
+						signalPlayerDone(player.ID)
+						return
+					}
+				case <-player.GameFound:
+					return
+				}
+			}
+		}()
+
 		<-done
 	}
 }
+
 func CreateGameAndMatch(hub *types.Hub, p1, p2 *types.Player) *types.Game {
 	white := p1
 	black := p2
@@ -153,6 +269,9 @@ func CreateGameAndMatch(hub *types.Hub, p1, p2 *types.Player) *types.Game {
 	black.GameId = game.ID
 	hub.Mu.Unlock()
 
+	close(white.GameFound)
+	close(black.GameFound)
+
 	if err := db.CreateMatch(context.Background(), game.ID, white.ID, black.ID, string(types.StatusActive)); err != nil {
 		fmt.Println("[ERROR] failed to persist match:", err)
 	}
@@ -166,14 +285,7 @@ func CreateGameAndMatch(hub *types.Hub, p1, p2 *types.Player) *types.Game {
 func notifyGameStart(game *types.Game) {
 	fmt.Printf("[NOTIFY] game_start → %s (White) and %s (Black)\n", game.White.Name, game.Black.Name)
 
-	boardMsg := map[string]interface{}{
-		"type":            "board_update",
-		"board":           convertBoardToJSON(game.Board),
-		"turn":            string(game.Turn),
-		"capturedByWhite": convertCapturedToJSON(game.CapturedByWhite),
-		"capturedByBlack": convertCapturedToJSON(game.CapturedByBlack),
-	}
-	boardBytes, _ := json.Marshal(boardMsg)
+	boardBytes := boardUpdateBytes(game)
 
 	whiteBytes, _ := json.Marshal(map[string]interface{}{
 		"type": "game_start",
@@ -199,12 +311,8 @@ func notifyGameStart(game *types.Game) {
 		{game.White, whiteBytes},
 		{game.Black, blackBytes},
 	} {
-		if err := pair.player.Conn.WriteMessage(websocket.TextMessage, pair.start); err != nil {
-			fmt.Printf("[ERROR] game_start to %s: %v\n", pair.player.Name, err)
-		}
-		if err := pair.player.Conn.WriteMessage(websocket.TextMessage, boardBytes); err != nil {
-			fmt.Printf("[ERROR] board_update to %s: %v\n", pair.player.Name, err)
-		}
+		send(pair.player, pair.start)
+		send(pair.player, boardBytes)
 		fmt.Printf("[NOTIFY] Sent to %s\n", pair.player.Name)
 	}
 }
@@ -265,80 +373,91 @@ func listenForMoves(hub *types.Hub, player *types.Player, game *types.Game) {
 
 	fmt.Printf("[LISTEN] %s listening as %s\n", player.Name, myColor)
 
-	for {
-		_, message, err := player.Conn.ReadMessage()
-		if err != nil {
-			fmt.Printf("[DISCONNECT] %s read error: %v\n", player.Name, err)
-			handleDisconnect(hub, player, game)
-			return
-		}
-
+	for message := range player.Incoming {
 		fmt.Printf("[MOVE] %s sent: %s\n", player.Name, string(message))
-		fmt.Printf("[STATE] Game %s turn: %s, %s is: %s\n", game.ID, game.Turn, player.Name, myColor)
 
 		if myColor != game.Turn {
 			fmt.Printf("[REJECT] Not %s's turn\n", player.Name)
-			player.Conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"not your turn"}}`))
+			send(player, []byte(`{"type":"error","payload":{"message":"not your turn"}}`))
 			continue
 		}
 
-		fmt.Printf("[ACCEPT] Move from %s: %s\n", player.Name, string(message))
 		ExecuteMove(message, game, player)
-		fmt.Printf("[STATE] New turn: %s\n", game.Turn)
+
+		opponent := opponentOf(game, player)
 
 		if rules.IsKingInCheck(game.Turn, game.Board) {
-			opponent := game.Black
-			if player == game.Black {
-				opponent = game.White
-			}
-
-			checkMsg := map[string]interface{}{
+			checkBytes, _ := json.Marshal(map[string]interface{}{
 				"type": "check",
 				"payload": map[string]interface{}{
 					"kingColor": string(game.Turn),
 					"message":   "CHECK! " + string(game.Turn) + " king is in check!",
 				},
-			}
-			checkBytes, _ := json.Marshal(checkMsg)
-
-			player.Conn.WriteMessage(websocket.TextMessage, checkBytes)
-			opponent.Conn.WriteMessage(websocket.TextMessage, checkBytes)
-			fmt.Printf("[CHECK] %s king is in check!\n", game.Turn)
+			})
+			send(player, checkBytes)
+			send(opponent, checkBytes)
 		}
 
-		opponent := game.Black
-		if player == game.Black {
-			opponent = game.White
-		}
-
-		boardMsg := map[string]interface{}{
-			"type":            "board_update",
-			"board":           convertBoardToJSON(game.Board),
-			"turn":            string(game.Turn),
-			"capturedByWhite": convertCapturedToJSON(game.CapturedByWhite),
-			"capturedByBlack": convertCapturedToJSON(game.CapturedByBlack),
-		}
-		boardBytes, _ := json.Marshal(boardMsg)
-
-		if err := player.Conn.WriteMessage(websocket.TextMessage, boardBytes); err != nil {
-			fmt.Printf("[ERROR] board to mover %s: %v\n", player.Name, err)
-		}
-		if err := opponent.Conn.WriteMessage(websocket.TextMessage, boardBytes); err != nil {
-			fmt.Printf("[ERROR] board to opponent %s: %v\n", opponent.Name, err)
-		}
+		boardBytes := boardUpdateBytes(game)
+		send(player, boardBytes)
+		send(opponent, boardBytes)
 
 		if game.Status != types.StatusActive {
-			fmt.Printf("[GAME_OVER] Game %s ended: %s\n", game.ID, game.Status)
 			notifyGameOver(hub, game)
 			return
 		}
 	}
+
+	// Incoming closed -> this player's socket died. Unblock their own
+	// HandleWebSocket handler immediately (independent of the game's fate),
+	// then give them a grace window to reconnect before anyone wins.
+	fmt.Printf("[DISCONNECT] %s's read loop ended\n", player.Name)
+	signalPlayerDone(player.ID)
+	handlePlayerDisconnect(hub, player, game)
 }
 
 var gameEndedMu sync.Mutex
 
-func handleDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
-	fmt.Printf("[DISCONNECT] %s in game %s\n", player.Name, game.ID)
+// handlePlayerDisconnect starts (or no-ops if the game already ended) a
+// 60s grace period instead of immediately forfeiting the game.
+func handlePlayerDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
+	gameEndedMu.Lock()
+	stillActive := game.Status == types.StatusActive || game.Status == types.StatusCheck
+	gameEndedMu.Unlock()
+	if !stillActive {
+		fmt.Printf("[DISCONNECT] Game already ended (%s)\n", game.Status)
+		return
+	}
+
+	graceMu.Lock()
+	if _, exists := grace[player.ID]; exists {
+		graceMu.Unlock()
+		return
+	}
+	timer := time.AfterFunc(disconnectGraceWindow, func() {
+		graceMu.Lock()
+		delete(grace, player.ID)
+		graceMu.Unlock()
+		finalizeDisconnect(hub, player, game)
+	})
+	grace[player.ID] = &pendingDisconnect{timer: timer, game: game, player: player}
+	graceMu.Unlock()
+
+	msgBytes, _ := json.Marshal(map[string]interface{}{
+		"type": "opponent_disconnected",
+		"payload": map[string]interface{}{
+			"message":      fmt.Sprintf("%s disconnected. Waiting up to 60s for them to reconnect...", player.Name),
+			"graceSeconds": int(disconnectGraceWindow.Seconds()),
+		},
+	})
+	send(opponentOf(game, player), msgBytes)
+	fmt.Printf("[GRACE] %s disconnected from game %s — waiting %v\n", player.Name, game.ID, disconnectGraceWindow)
+}
+
+// finalizeDisconnect is the old "opponent wins" logic — now only runs
+// once the grace window has actually expired without a reconnect.
+func finalizeDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
+	fmt.Printf("[DISCONNECT] %s never reconnected to game %s — forfeiting\n", player.Name, game.ID)
 
 	gameEndedMu.Lock()
 	defer gameEndedMu.Unlock()
@@ -349,7 +468,6 @@ func handleDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
 	}
 	game.Status = types.StatusEneded
 
-	// Whoever disconnected loses; the other color wins.
 	if player == game.White {
 		game.Winner = types.Black
 	} else {
@@ -367,22 +485,26 @@ func handleDisconnect(hub *types.Hub, player *types.Player, game *types.Game) {
 		fmt.Println("[ERROR] failed to persist match result:", err)
 	}
 
-	opponent := game.Black
-	if player == game.Black {
-		opponent = game.White
-	}
+	msgBytes, _ := json.Marshal(map[string]interface{}{
+		"type": "game_over",
+		"payload": map[string]interface{}{
+			"winner": winner,
+			"reason": "opponent_disconnected",
+		},
+	})
+
+	opponent := opponentOf(game, player)
 	if opponent != nil {
-		opponent.Conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"Opponent disconnected"}}`))
-		opponent.Conn.Close()
+		send(opponent, msgBytes)
+		closePlayerConn(opponent)
 	}
-	player.Conn.Close()
+	closePlayerConn(player)
 
 	CleanupPlayer(hub, player)
 	if opponent != nil {
 		CleanupPlayer(hub, opponent)
 	}
 
-	// Remove game from hub
 	hub.Mu.Lock()
 	delete(hub.Games, game.ID)
 	hub.Mu.Unlock()
@@ -422,12 +544,11 @@ func notifyGameOver(hub *types.Hub, game *types.Game) {
 
 	for _, p := range []*types.Player{game.White, game.Black} {
 		if p != nil {
-			p.Conn.WriteMessage(websocket.TextMessage, msgBytes)
-			p.Conn.Close()
+			send(p, msgBytes)
+			closePlayerConn(p)
 		}
 	}
 
-	// Clean up from hub
 	if game.White != nil {
 		CleanupPlayer(hub, game.White)
 	}
@@ -435,7 +556,6 @@ func notifyGameOver(hub *types.Hub, game *types.Game) {
 		CleanupPlayer(hub, game.Black)
 	}
 
-	// Remove game from hub
 	hub.Mu.Lock()
 	delete(hub.Games, game.ID)
 	hub.Mu.Unlock()
