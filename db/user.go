@@ -23,12 +23,12 @@ func UpsertUserByGoogleID(ctx context.Context, googleID, email, name string) (*t
 
 func GetUserByID(ctx context.Context, id string) (*types.User, error) {
 	row := Pool.QueryRow(ctx, `
-		SELECT id, google_id, email, name, elo, created_at
+		SELECT id, google_id, email, name, elo, puzzle_rating, created_at
 		FROM users WHERE id = $1
 	`, id)
 
 	var u types.User
-	if err := row.Scan(&u.ID, &u.GoogleID, &u.Email, &u.Name, &u.Elo, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.GoogleID, &u.Email, &u.Name, &u.Elo, &u.PuzzleRating, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil

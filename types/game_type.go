@@ -16,8 +16,8 @@ type Player struct {
 	GameId    string
 	IsInGame  bool
 	GameFound chan struct{}
-	Send      chan []byte // outbound writes go here; only writePump touches Conn for writing
-	Incoming  chan []byte // inbound game messages land here; only readPump touches Conn for reading
+	Send      chan []byte
+	Incoming  chan []byte
 	CloseOnce sync.Once
 }
 
@@ -76,10 +76,11 @@ type gameold struct {
 	BlackConn      *websocket.Conn
 }
 type User struct {
-	ID        string
-	GoogleID  string
-	Email     string
-	Name      string
-	Elo       int
-	CreatedAt time.Time
+	ID           string
+	GoogleID     string
+	Email        string
+	Name         string
+	Elo          int
+	CreatedAt    time.Time
+	PuzzleRating int
 }
