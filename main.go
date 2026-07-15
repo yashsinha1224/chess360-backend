@@ -46,6 +46,7 @@ func main() {
 	protected.Use(auth.RequireAuth())
 	protected.GET("/matches", api.ListMyMatches)
 	protected.GET("/matches/:id", api.GetMatch)
+	protected.GET("/matches/:id/review", api.ReviewMatch)
 	protected.GET("/puzzles/next", api.GetNextPuzzle)
 	protected.POST("/puzzles/:id/attempt", api.SubmitPuzzleAttempt)
 
