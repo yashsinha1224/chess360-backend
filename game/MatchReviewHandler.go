@@ -9,29 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// MatchReviewHandler powers GET /api/matches/:id/review -- the
-// finished-game counterpart to ReviewGameHandler (which reads live
-// games out of hub.Games). This one takes a function for fetching a
-// completed match's stored move list, so it doesn't need to know your
-// db package's exact types -- just wire it to whatever already backs
-// your GET /api/matches/:id handler.
-//
-// Wire it up next to that existing route, e.g.:
-//
-//	router.GET("/api/matches/:id", matches.GetMatchHandler(db))
-//	router.GET("/api/matches/:id/review", game.MatchReviewHandler(
-//	    func(ctx context.Context, id string) ([]string, error) {
-//	        m, err := db.GetMatch(ctx, id) // <- your real call
-//	        if err != nil {
-//	            return nil, err
-//	        }
-//	        return m.Moves, nil
-//	    },
-//	))
-//
-// The frontend's useReview hook expects the JSON shape this returns:
-// {"matchId": "...", "moves": [{"number", "move", "color", "evalBefore",
-// "evalAfter", "deltaForMover", "classification"}, ...]}.
 func MatchReviewHandler(getMatchMoves func(ctx context.Context, matchID string) ([]string, error)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		matchID := ctx.Param("id")

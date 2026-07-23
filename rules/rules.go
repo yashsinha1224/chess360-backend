@@ -18,9 +18,12 @@ func GetMoveForPiece(Square types.BoardSquare, board [][]types.BoardSquare) []ty
 
 			// Double move on first move
 			if !pawn.HasMoved {
+				intermediateRow := Square.Position.Row + direction
 				newRow := Square.Position.Row + direction*2
 				col := Square.Position.Col
-				if newRow >= 0 && newRow < 8 && board[newRow][col].Piece == nil {
+				if newRow >= 0 && newRow < 8 &&
+					board[intermediateRow][col].Piece == nil &&
+					board[newRow][col].Piece == nil {
 					legal = append(legal, types.Position{Row: newRow, Col: col})
 				}
 			}
@@ -372,6 +375,27 @@ func IsKingInCheck(color types.Color, board [][]types.BoardSquare) bool {
 	}
 
 	return false
+}
+
+func GetEnPassantMove(from types.Position, board [][]types.BoardSquare, target *types.Position) (types.Position, bool) {
+	if target == nil {
+		return types.Position{}, false
+	}
+	sq := board[from.Row][from.Col]
+	pawn, ok := sq.Piece.(*types.PawnPiece)
+	if !ok {
+		return types.Position{}, false
+	}
+
+	direction := -1
+	if pawn.GetColor() == types.Black {
+		direction = 1
+	}
+
+	if target.Row == from.Row+direction && (target.Col == from.Col-1 || target.Col == from.Col+1) {
+		return *target, true
+	}
+	return types.Position{}, false
 }
 
 // IsMoveSafe checks if making a move would leave own king in check

@@ -43,6 +43,7 @@ type Game struct {
 	StartTime       time.Time
 	CapturedByWhite []ChessPiece
 	CapturedByBlack []ChessPiece
+	EnPassantTarget *Position
 }
 
 type Message struct {

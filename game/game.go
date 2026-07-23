@@ -7,8 +7,6 @@ import (
 	"strings"
 )
 
-// parsePosition parses a square like "e2" into (row, col).
-// Returns ok=false for malformed or out-of-range input instead of panicking.
 func parsePosition(pos string) (row int, col int, ok bool) {
 	if len(pos) != 2 {
 		return 0, 0, false
@@ -60,6 +58,13 @@ func ValidMove(message []byte, gamestate *types.Game, p *types.Player) bool {
 			return true
 		}
 	}
+	if fromSquare.Piece.GetType() == types.Pawn {
+		if epPos, ok := rules.GetEnPassantMove(fromSquare.Position, gamestate.Board, gamestate.EnPassantTarget); ok {
+			if epPos.Row == toRow && epPos.Col == toCol {
+				return true
+			}
+		}
+	}
 
 	send(p, []byte(`{"type":"error","payload":{"message":"illegal move"}}`))
 	return false
@@ -85,8 +90,34 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 	movingPiece := g.Board[fromRow][fromCol].Piece
 	capturedPiece := g.Board[toRow][toCol].Piece
 
+	isCastle := false
+	if _, ok := movingPiece.(*types.KingPiece); ok {
+		if toCol-fromCol == 2 || toCol-fromCol == -2 {
+			isCastle = true
+		}
+	}
+
+	isEnPassant := false
+	if _, ok := movingPiece.(*types.PawnPiece); ok {
+		if fromCol != toCol && capturedPiece == nil {
+			isEnPassant = true
+		}
+	}
+
 	g.Board[toRow][toCol].Piece = g.Board[fromRow][fromCol].Piece
 	g.Board[fromRow][fromCol].Piece = nil
+
+	if isCastle {
+		fromSq := types.BoardSquare{Position: types.Position{Row: fromRow, Col: fromCol}}
+		toSq := types.BoardSquare{Position: types.Position{Row: toRow, Col: toCol}}
+		rules.ExecuteCastling(fromSq, toSq, g.Board)
+	}
+
+	if isEnPassant {
+		capRow, capCol := fromRow, toCol
+		capturedPiece = g.Board[capRow][capCol].Piece
+		g.Board[capRow][capCol].Piece = nil
+	}
 
 	if capturedPiece != nil && movingPiece != nil {
 		if movingPiece.GetColor() == types.White {
@@ -110,6 +141,17 @@ func ExecuteMove(message []byte, g *types.Game, p *types.Player) {
 		if (toRow == 0 && piece.GetColor() == types.White) ||
 			(toRow == 7 && piece.GetColor() == types.Black) {
 			g.Board[toRow][toCol].Piece = types.MakePiece(piece.GetColor(), types.Queen)
+		}
+	}
+
+	// Update en passant target: only set immediately after a pawn's
+	// double-step, cleared on every other move (it only ever lasts one
+	// ply — you can't en passant a pawn that skipped two moves ago).
+	g.EnPassantTarget = nil
+	if _, ok := movingPiece.(*types.PawnPiece); ok {
+		if toRow-fromRow == 2 || toRow-fromRow == -2 {
+			midRow := (fromRow + toRow) / 2
+			g.EnPassantTarget = &types.Position{Row: midRow, Col: fromCol}
 		}
 	}
 
